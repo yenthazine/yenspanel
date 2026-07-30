@@ -42,7 +42,7 @@ local STAFF_USERIDS = {
 --// SELECTED STATE & TOGGLES
 local SelectedPlayer = nil
 local SpectatingPlayer = nil
-local InGameTagsActive = false
+local GlobalEspEnabled = false
 
 -- Cache for Group Memberships & Scraped Tags
 local groupCache = {}
@@ -132,15 +132,36 @@ local function isStaff(player)
 	return data.IsStaff
 end
 
--- ULTIMATE TAG PARSER (DEEP SCANNING UI & NAMES)
+-- ULTIMATE TAG PARSER (Scans Character/Head for UI text, BillboardGuis, and tags)
 local function GetCharacterOverheadTags(plr)
 	local data = ProcessPlayerGroupData(plr)
 	local tags = data.Tags or ""
 	
+	-- 1. Check Dynamic Cache from Background Scanner
 	if dynamicTagCache[plr.Name] then
 		for _, cachedTag in ipairs(dynamicTagCache[plr.Name]) do
 			if not tags:find(cachedTag, 1, true) then
 				tags = tags .. cachedTag .. " "
+			end
+		end
+	end
+	
+	-- 2. Real-time direct inspection of the player's character and head for chat tags / overhead tags
+	if plr and plr.Character then
+		for _, descendant in ipairs(plr.Character:GetDescendants()) do
+			if descendant:IsA("TextLabel") or descendant:IsA("TextBox") then
+				local txt = descendant.Text
+				if txt and txt ~= "" then
+					-- Look for bracket tags like [LOST], [BOPS], [jugg], etc., that aren't just the player's name
+					for bracket in txt:gmatch("%b[]") do
+						local lowerB = bracket:lower()
+						if bracket ~= "[ ]" and not lowerB:find(plr.Name:lower()) and not lowerB:find(plr.DisplayName:lower()) then
+							if not tags:find(bracket, 1, true) then
+								tags = tags .. bracket .. " "
+							end
+						end
+					end
+				end
 			end
 		end
 	end
@@ -367,7 +388,28 @@ BottomBarToggleBtn.MouseButton1Click:Connect(function()
 	BottomBarToggleBtn.ImageColor3 = Panel.Visible and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 255, 255)
 end)
 
--- Deselect Player when Clicking Outside
+-- Complete Cleanup Helper for All ESP Tags/Highlights across the server
+local function RemoveESPFromPlayer(plr)
+	if plr and plr.Character then
+		local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
+		if head then
+			for _, tag in ipairs(head:GetChildren()) do
+				if tag.Name == "YenRedNameTag" then tag:Destroy() end
+			end
+		end
+		for _, hl in ipairs(plr.Character:GetChildren()) do
+			if hl.Name == "YenHighlight" then hl:Destroy() end
+		end
+	end
+end
+
+local function RemoveESPFromEveryone()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		RemoveESPFromPlayer(plr)
+	end
+end
+
+-- Deselect Player and Force Clean ESP when Clicking Outside
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 		if SelectedPlayer and Panel.Visible then
@@ -384,6 +426,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			                          (mousePos.Y >= btnPos.Y and mousePos.Y <= btnPos.Y + btnSize.Y)
 
 			if not isInsidePanel and not isInsideToggleBtn then
+				if SelectedPlayer then
+					RemoveESPFromPlayer(SelectedPlayer)
+				end
 				SelectedPlayer = nil
 				EspBtn.Visible = false
 				if UpdatePlayerList then UpdatePlayerList() end
@@ -438,132 +483,121 @@ local function TeleportToPlayer(targetPlr)
 end
 
 --// ----------------------------------------------------
---// IN-GAME ESP & DIRECT PLAYER ESP LOGIC
+--// INDIVIDUAL & GLOBAL ESP LOGIC (NAMES ONLY, NO HIGHLIGHTS, NO NOTIFICATIONS)
 --// ----------------------------------------------------
 local function CreateInGameTag(plr)
-	if not plr or plr == LocalPlayer or not plr.Character then return end
-	local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
-	if not head then return end
-
-	local existingTag = head:FindFirstChild("YenRedNameTag")
-	if existingTag then existingTag:Destroy() end
-
-	local bb = Instance.new("BillboardGui")
-	bb.Name = "YenRedNameTag"
-	bb.Adornee = head
-	bb.Size = UDim2.new(0, 300, 0, 50)
-	bb.StudsOffset = Vector3.new(0, 2.5, 0)
-	bb.AlwaysOnTop = true
-	bb.Parent = head
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
+	if not plr or plr == LocalPlayer then return end
 	
-	local fullTags = GetCharacterOverheadTags(plr)
-	local prefix = (fullTags ~= "") and (fullTags .. " ") or ""
-	
-	label.Text = prefix .. plr.DisplayName .. " (@" .. plr.Name .. ")"
-	label.TextColor3 = Color3.fromRGB(255, 0, 0)
-	label.TextScaled = false
-	label.TextSize = 14
-	label.Font = Enum.Font.SourceSansBold
-	label.TextStrokeTransparency = 0.2
-	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	label.Parent = bb
-end
-
-local function RemoveInGameTag(plr)
-	if plr and plr.Character then
-		local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
-		if head then
-			local existingTag = head:FindFirstChild("YenRedNameTag")
-			if existingTag then existingTag:Destroy() end
+	task.spawn(function()
+		local char = plr.Character
+		local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+		
+		local attempts = 0
+		while (not char or not head or not char:FindFirstChild("Humanoid")) and attempts < 10 do
+			task.wait(0.2)
+			char = plr.Character
+			head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+			attempts += 1
 		end
-	end
+		
+		if not char or not head then return end
+
+		for _, tag in ipairs(head:GetChildren()) do
+			if tag.Name == "YenRedNameTag" then tag:Destroy() end
+		end
+
+		local bb = Instance.new("BillboardGui")
+		bb.Name = "YenRedNameTag"
+		bb.Adornee = head
+		bb.Size = UDim2.new(0, 300, 0, 50)
+		bb.StudsOffset = Vector3.new(0, 2.5, 0)
+		bb.AlwaysOnTop = true
+		bb.Parent = head
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		
+		local fullTags = GetCharacterOverheadTags(plr)
+		local prefix = (fullTags ~= "") and (fullTags .. " ") or ""
+		
+		label.Text = prefix .. plr.DisplayName .. " (@" .. plr.Name .. ")"
+		label.TextColor3 = Color3.fromRGB(255, 0, 0)
+		label.TextScaled = false
+		label.TextSize = 14
+		label.Font = Enum.Font.SourceSansBold
+		label.TextStrokeTransparency = 0.2
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.Parent = bb
+	end)
 end
 
-local function RemoveInGameTags()
-	for _, plr in ipairs(Players:GetPlayers()) do
-		RemoveInGameTag(plr)
-	end
+local function ApplyESPToPlayer(plr)
+	if not plr or plr == LocalPlayer then return end
+	CreateInGameTag(plr)
 end
 
 local function TogglePlayerESP(plr)
-	if not plr or not plr.Character then return end
+	if not plr then return end
 	
 	local char = plr.Character
-	local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+	local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
 	local hasTag = head and head:FindFirstChild("YenRedNameTag") ~= nil
-	local hasHighlight = char:FindFirstChild("YenHighlight") ~= nil
 	
-	if hasTag or hasHighlight then
-		RemoveInGameTag(plr)
-		if char:FindFirstChild("YenHighlight") then
-			char.YenHighlight:Destroy()
-		end
+	if hasTag then
+		RemoveESPFromPlayer(plr)
 	else
-		CreateInGameTag(plr)
-		
-		local hl = Instance.new("Highlight")
-		hl.Name = "YenHighlight"
-		hl.Adornee = char
-		hl.FillColor = Color3.fromRGB(255, 0, 0)
-		hl.FillTransparency = 0.5
-		hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-		hl.OutlineTransparency = 0
-		hl.Parent = char
+		ApplyESPToPlayer(plr)
 	end
 end
 
 local function IsPlayerEspActive(plr)
 	if not plr or not plr.Character then return false end
 	local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
-	local hasTag = head and head:FindFirstChild("YenRedNameTag") ~= nil
-	local hasHighlight = plr.Character:FindFirstChild("YenHighlight") ~= nil
-	return hasTag or hasHighlight
+	return head and head:FindFirstChild("YenRedNameTag") ~= nil
 end
 
 EspBtn.MouseButton1Click:Connect(function()
 	if SelectedPlayer then
 		TogglePlayerESP(SelectedPlayer)
-		EspBtn.TextColor3 = IsPlayerEspActive(SelectedPlayer) and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 100, 100)
+		task.delay(0.1, function()
+			if SelectedPlayer then
+				EspBtn.TextColor3 = IsPlayerEspActive(SelectedPlayer) and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 100, 100)
+			end
+		end)
 	end
 end)
 
-local function UpdateInGameTags()
-	if InGameTagsActive then
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= LocalPlayer then
-				CreateInGameTag(plr)
-			end
-		end
-	else
-		RemoveInGameTags()
-	end
-end
-
+--// ----------------------------------------------------
+--// KEYBIND LISTENER (PRESS Q TO ESP EVERYONE - NAMES ONLY, NO NOTIFICATIONS)
+--// ----------------------------------------------------
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
+	
 	if input.KeyCode == Enum.KeyCode.Q then
-		InGameTagsActive = not InGameTagsActive
-		UpdateInGameTags()
+		GlobalEspEnabled = not GlobalEspEnabled
+		
+		if GlobalEspEnabled then
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer then
+					ApplyESPToPlayer(plr)
+				end
+			end
+		else
+			RemoveESPFromEveryone()
+		end
 	end
 end)
 
-local function OnCharacterAdded(plr, char)
-	if InGameTagsActive and plr ~= LocalPlayer then
-		char:WaitForChild("HumanoidRootPart", 5)
-		CreateInGameTag(plr)
-	end
-end
-
-for _, plr in ipairs(Players:GetPlayers()) do
-	plr.CharacterAdded:Connect(function(char) OnCharacterAdded(plr, char) end)
-end
-
+-- Automatically apply ESP to newly joining players if Global ESP is active
 Players.PlayerAdded:Connect(function(plr)
-	plr.CharacterAdded:Connect(function(char) OnCharacterAdded(plr, char) end)
+	if GlobalEspEnabled then
+		task.delay(1, function()
+			if GlobalEspEnabled and plr ~= LocalPlayer then
+				ApplyESPToPlayer(plr)
+			end
+		end)
+	end
 end)
 
 --// ----------------------------------------------------
@@ -632,6 +666,10 @@ UpdatePlayerList = function()
 		ClickBtn.Parent = Row
 		
 		ClickBtn.MouseButton1Click:Connect(function()
+			if SelectedPlayer and SelectedPlayer ~= plr then
+				RemoveESPFromPlayer(SelectedPlayer)
+			end
+			
 			SelectedPlayer = (SelectedPlayer == plr) and nil or plr
 			
 			EspBtn.Visible = (SelectedPlayer ~= nil)
@@ -663,6 +701,8 @@ ToggleTagBtn.MouseButton1Click:Connect(function()
 	
 	ToggleTagBtn.Text = "Copied!"
 	ToggleTagBtn.TextColor3 = Color3.fromRGB(255, 255, 0)
+	
+	tagString = overheadPrefix .. SelectedPlayer.DisplayName .. " (@" .. SelectedPlayer.Name .. ")"
 	
 	task.delay(1.5, function()
 		ToggleTagBtn.Text = "Toggle Tag"
@@ -724,10 +764,12 @@ Players.PlayerAdded:Connect(function(player)
 	CheckAndNotifyStaff(player, true)
 end)
 
+Players.PlayerRemoving:Connect(joinOrLeavePlayer)
 Players.PlayerRemoving:Connect(function(player)
 	CheckAndNotifyStaff(player, false)
 	groupCache[player.UserId] = nil
 	if SelectedPlayer == player then 
+		RemoveESPFromPlayer(player)
 		SelectedPlayer = nil 
 		EspBtn.Visible = false
 	end
