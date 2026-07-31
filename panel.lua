@@ -1,5 +1,5 @@
 --// ====================================================
---// STAFF PANEL + STAFF NOTIFIER + ANTI-AIMVIEW SCRIPT
+--// STAFF PANEL + STAFF NOTIFIER + ANTI-AIMVIEW SCRIPT (OPTIMIZED)
 --// ====================================================
 
 --// SERVICES
@@ -44,15 +44,18 @@ local SelectedPlayer = nil
 local SpectatingPlayer = nil
 local GlobalEspEnabled = false
 
--- Cache for Group Memberships & Scraped Tags
+-- Cache
 local groupCache = {}
 local dynamicTagCache = {}
+local thumbnailCache = {}
 local UpdatePlayerList
 
 --// ----------------------------------------------------
---// HELPER FUNCTIONS (NOTIFICATIONS & STAFF)
+--// HELPER FUNCTIONS
 --// ----------------------------------------------------
 local function getHead(userId)
+	if thumbnailCache[userId] then return thumbnailCache[userId] end
+	
 	local success, image = pcall(function()
 		return Players:GetUserThumbnailAsync(
 			userId,
@@ -61,7 +64,9 @@ local function getHead(userId)
 		)
 	end)
 
-	return success and image or "rbxassetid://15059364356"
+	local result = success and image or "rbxassetid://15059364356"
+	thumbnailCache[userId] = result
+	return result
 end
 
 local function notify(title, message, icon)
@@ -112,6 +117,7 @@ local function ProcessPlayerGroupData(plr)
 					end
 				end
 			end
+			task.wait() -- Cooperative yield to prevent freezing
 		end
 
 		groupCache[plr.UserId] = {
@@ -132,12 +138,10 @@ local function isStaff(player)
 	return data.IsStaff
 end
 
--- ULTIMATE TAG PARSER (Scans Character/Head for UI text, BillboardGuis, and tags)
 local function GetCharacterOverheadTags(plr)
 	local data = ProcessPlayerGroupData(plr)
 	local tags = data.Tags or ""
 	
-	-- 1. Check Dynamic Cache from Background Scanner
 	if dynamicTagCache[plr.Name] then
 		for _, cachedTag in ipairs(dynamicTagCache[plr.Name]) do
 			if not tags:find(cachedTag, 1, true) then
@@ -146,18 +150,27 @@ local function GetCharacterOverheadTags(plr)
 		end
 	end
 	
-	-- 2. Real-time direct inspection of the player's character and head for chat tags / overhead tags
-	if plr and plr.Character then
-		for _, descendant in ipairs(plr.Character:GetDescendants()) do
-			if descendant:IsA("TextLabel") or descendant:IsA("TextBox") then
-				local txt = descendant.Text
-				if txt and txt ~= "" then
-					-- Look for bracket tags like [LOST], [BOPS], [jugg], etc., that aren't just the player's name
+	return tags
+end
+
+-- ZERO CPU SPIKE: Event-Driven UI Text Scanner
+local function InspectTextObject(obj)
+	if obj:IsA("TextLabel") or obj:IsA("TextBox") then
+		local txt = obj.Text
+		if txt and txt ~= "" then
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if txt:find(plr.Name, 1, true) or txt:find(plr.DisplayName, 1, true) then
 					for bracket in txt:gmatch("%b[]") do
 						local lowerB = bracket:lower()
 						if bracket ~= "[ ]" and not lowerB:find(plr.Name:lower()) and not lowerB:find(plr.DisplayName:lower()) then
-							if not tags:find(bracket, 1, true) then
-								tags = tags .. bracket .. " "
+							dynamicTagCache[plr.Name] = dynamicTagCache[plr.Name] or {}
+							local exists = false
+							for _, existing in ipairs(dynamicTagCache[plr.Name]) do
+								if existing == bracket then exists = true break end
+							end
+							if not exists then
+								table.insert(dynamicTagCache[plr.Name], bracket)
+								if UpdatePlayerList then UpdatePlayerList() end
 							end
 						end
 					end
@@ -165,45 +178,23 @@ local function GetCharacterOverheadTags(plr)
 			end
 		end
 	end
-	
-	return tags
 end
 
--- Comprehensive Continuous Background Scanner
+local function MonitorContainer(container)
+	if not container then return end
+	container.DescendantAdded:Connect(function(descendant)
+		InspectTextObject(descendant)
+	end)
+	for _, desc in ipairs(container:GetDescendants()) do
+		InspectTextObject(desc)
+	end
+end
+
+MonitorContainer(Workspace)
 task.spawn(function()
-	while task.wait(0.2) do
-		pcall(function()
-			local roots = { Workspace, LocalPlayer:FindFirstChild("PlayerGui") }
-			for _, root in ipairs(roots) do
-				if root then
-					for _, obj in ipairs(root:GetDescendants()) do
-						if obj:IsA("TextLabel") or obj:IsA("TextBox") then
-							local txt = obj.Text
-							if txt and txt ~= "" then
-								for _, plr in ipairs(Players:GetPlayers()) do
-									if txt:find(plr.Name, 1, true) or txt:find(plr.DisplayName, 1, true) then
-										for bracket in txt:gmatch("%b[]") do
-											local lowerB = bracket:lower()
-											if bracket ~= "[ ]" and not lowerB:find(plr.Name:lower()) and not lowerB:find(plr.DisplayName:lower()) then
-												dynamicTagCache[plr.Name] = dynamicTagCache[plr.Name] or {}
-												local exists = false
-												for _, existing in ipairs(dynamicTagCache[plr.Name]) do
-													if existing == bracket then exists = true break end
-												end
-												if not exists then
-													table.insert(dynamicTagCache[plr.Name], bracket)
-													if UpdatePlayerList then UpdatePlayerList() end
-												end
-											end
-										end
-									end
-								end
-							end
-						end
-					end
-				end
-			end
-		end)
+	local playerGui = LocalPlayer:WaitForChild("PlayerGui", 5)
+	if playerGui then
+		MonitorContainer(playerGui)
 	end
 end)
 
@@ -215,7 +206,6 @@ ScreenGui.Name = "StaffPanelGui"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
--- Panel Frame
 local Panel = Instance.new("Frame")
 Panel.Name = "StaffPanel"
 Panel.Size = UDim2.new(0, 310, 0, 260)
@@ -227,10 +217,8 @@ Panel.BorderColor3 = Color3.fromRGB(40, 40, 40)
 Panel.Visible = true
 Panel.Parent = ScreenGui
 
--- Header Title
 local Header = Instance.new("TextLabel")
 Header.Size = UDim2.new(1, 0, 0, 25)
-Header.Position = UDim2.new(0, 0, 0, 0)
 Header.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
 Header.BackgroundTransparency = 0.5
 Header.Text = "  Yens Panel ⭐"
@@ -240,7 +228,6 @@ Header.Font = Enum.Font.SourceSansBold
 Header.TextXAlignment = Enum.TextXAlignment.Left
 Header.Parent = Panel
 
--- Search Box
 local SearchBox = Instance.new("TextBox")
 SearchBox.Size = UDim2.new(0, 100, 0, 20)
 SearchBox.Position = UDim2.new(1, -105, 0, 2.5)
@@ -254,7 +241,6 @@ SearchBox.TextSize = 12
 SearchBox.Font = Enum.Font.SourceSans
 SearchBox.Parent = Panel
 
--- Player Scroll List Frame
 local PlayerList = Instance.new("ScrollingFrame")
 PlayerList.Size = UDim2.new(0, 195, 0, 225)
 PlayerList.Position = UDim2.new(0, 5, 0, 30)
@@ -263,7 +249,6 @@ PlayerList.BackgroundTransparency = 0.3
 PlayerList.BorderSizePixel = 1
 PlayerList.BorderColor3 = Color3.fromRGB(35, 35, 35)
 PlayerList.ScrollBarThickness = 4
-PlayerList.CanvasSize = UDim2.new(0, 0, 0, 0)
 PlayerList.AutomaticCanvasSize = Enum.AutomaticSize.Y
 PlayerList.Visible = true
 PlayerList.Parent = Panel
@@ -273,7 +258,6 @@ UIListLayout.Padding = UDim.new(0, 2)
 UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 UIListLayout.Parent = PlayerList
 
--- Colors Tab Frame
 local ColorsFrame = Instance.new("Frame")
 ColorsFrame.Name = "ColorsFrame"
 ColorsFrame.Size = UDim2.new(0, 195, 0, 225)
@@ -315,7 +299,6 @@ CreateColorOption("Red", Color3.fromRGB(60, 15, 15), 0.15)
 CreateColorOption("Blue", Color3.fromRGB(15, 25, 60), 0.15)
 CreateColorOption("Black", Color3.fromRGB(10, 10, 10), 0.05)
 
--- Right Action Buttons Panel
 local ActionFrame = Instance.new("Frame")
 ActionFrame.Size = UDim2.new(0, 100, 0, 225)
 ActionFrame.Position = UDim2.new(1, -105, 0, 30)
@@ -355,7 +338,6 @@ local EspBtn = CreateActionButton("ESP")
 EspBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
 EspBtn.Visible = false
 
--- Rejoin Logic
 RejoinBtn.MouseButton1Click:Connect(function()
 	if #Players:GetPlayers() <= 1 then
 		TeleportService:Teleport(game.PlaceId, LocalPlayer)
@@ -364,7 +346,6 @@ RejoinBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Colors Navigation Logic
 ColorsTabBtn.MouseButton1Click:Connect(function()
 	local open = not ColorsFrame.Visible
 	ColorsFrame.Visible = open
@@ -372,7 +353,6 @@ ColorsTabBtn.MouseButton1Click:Connect(function()
 	ColorsTabBtn.TextColor3 = open and Color3.fromRGB(255, 255, 0) or Color3.fromRGB(180, 180, 255)
 end)
 
--- Bottom Bar Toggle Button
 local BottomBarToggleBtn = Instance.new("ImageButton")
 BottomBarToggleBtn.Name = "StaffPanelToggleBtn"
 BottomBarToggleBtn.Size = UDim2.new(0, 28, 0, 28)
@@ -388,7 +368,6 @@ BottomBarToggleBtn.MouseButton1Click:Connect(function()
 	BottomBarToggleBtn.ImageColor3 = Panel.Visible and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 255, 255)
 end)
 
--- Complete Cleanup Helper for All ESP Tags/Highlights across the server
 local function RemoveESPFromPlayer(plr)
 	if plr and plr.Character then
 		local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
@@ -396,9 +375,6 @@ local function RemoveESPFromPlayer(plr)
 			for _, tag in ipairs(head:GetChildren()) do
 				if tag.Name == "YenRedNameTag" then tag:Destroy() end
 			end
-		end
-		for _, hl in ipairs(plr.Character:GetChildren()) do
-			if hl.Name == "YenHighlight" then hl:Destroy() end
 		end
 	end
 end
@@ -408,34 +384,6 @@ local function RemoveESPFromEveryone()
 		RemoveESPFromPlayer(plr)
 	end
 end
-
--- Deselect Player and Force Clean ESP when Clicking Outside
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		if SelectedPlayer and Panel.Visible then
-			local mousePos = UserInputService:GetMouseLocation() - Vector2.new(0, 36)
-			local panelPos = Panel.AbsolutePosition
-			local panelSize = Panel.AbsoluteSize
-
-			local isInsidePanel = (mousePos.X >= panelPos.X and mousePos.X <= panelPos.X + panelSize.X) and
-			                      (mousePos.Y >= panelPos.Y and mousePos.Y <= panelPos.Y + panelSize.Y)
-			
-			local btnPos = BottomBarToggleBtn.AbsolutePosition
-			local btnSize = BottomBarToggleBtn.AbsoluteSize
-			local isInsideToggleBtn = (mousePos.X >= btnPos.X and mousePos.X <= btnPos.X + btnSize.X) and
-			                          (mousePos.Y >= btnPos.Y and mousePos.Y <= btnPos.Y + btnSize.Y)
-
-			if not isInsidePanel and not isInsideToggleBtn then
-				if SelectedPlayer then
-					RemoveESPFromPlayer(SelectedPlayer)
-				end
-				SelectedPlayer = nil
-				EspBtn.Visible = false
-				if UpdatePlayerList then UpdatePlayerList() end
-			end
-		end
-	end
-end)
 
 -- Draggable UI Logic
 local dragging, dragInput, dragStart, startPos
@@ -467,7 +415,6 @@ UserInputService.InputChanged:Connect(function(input)
 	end
 end)
 
--- Teleport Logic
 local function TeleportToPlayer(targetPlr)
 	if not targetPlr or targetPlr == LocalPlayer then return end
 	local myChar = LocalPlayer.Character
@@ -483,7 +430,7 @@ local function TeleportToPlayer(targetPlr)
 end
 
 --// ----------------------------------------------------
---// INDIVIDUAL & GLOBAL ESP LOGIC (NAMES ONLY, NO HIGHLIGHTS, NO NOTIFICATIONS)
+--// ESP LOGIC
 --// ----------------------------------------------------
 local function CreateInGameTag(plr)
 	if not plr or plr == LocalPlayer then return end
@@ -523,7 +470,6 @@ local function CreateInGameTag(plr)
 		
 		label.Text = prefix .. plr.DisplayName .. " (@" .. plr.Name .. ")"
 		label.TextColor3 = Color3.fromRGB(255, 0, 0)
-		label.TextScaled = false
 		label.TextSize = 14
 		label.Font = Enum.Font.SourceSansBold
 		label.TextStrokeTransparency = 0.2
@@ -539,7 +485,6 @@ end
 
 local function TogglePlayerESP(plr)
 	if not plr then return end
-	
 	local char = plr.Character
 	local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
 	local hasTag = head and head:FindFirstChild("YenRedNameTag") ~= nil
@@ -568,9 +513,6 @@ EspBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
---// ----------------------------------------------------
---// KEYBIND LISTENER (PRESS Q TO ESP EVERYONE - NAMES ONLY, NO NOTIFICATIONS)
---// ----------------------------------------------------
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	
@@ -589,7 +531,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
--- Automatically apply ESP to newly joining players if Global ESP is active
 Players.PlayerAdded:Connect(function(plr)
 	if GlobalEspEnabled then
 		task.delay(1, function()
@@ -601,9 +542,11 @@ Players.PlayerAdded:Connect(function(plr)
 end)
 
 --// ----------------------------------------------------
---// PANEL LIST LOGIC
+--// PANEL LIST LOGIC (Only runs when Panel is Open)
 --// ----------------------------------------------------
 UpdatePlayerList = function()
+	if not Panel.Visible then return end
+
 	local currentScrollPosition = PlayerList.CanvasPosition
 
 	for _, item in ipairs(PlayerList:GetChildren()) do
@@ -631,17 +574,8 @@ UpdatePlayerList = function()
 		AvatarImg.Size = UDim2.new(0, 26, 0, 26)
 		AvatarImg.Position = UDim2.new(0, 3, 0.5, -13)
 		AvatarImg.BackgroundTransparency = 1
-		AvatarImg.Image = "rbxassetid://15059364356"
+		AvatarImg.Image = getHead(plr.UserId)
 		AvatarImg.Parent = Row
-		
-		task.spawn(function()
-			local success, img = pcall(function()
-				return Players:GetUserThumbnailAsync(plr.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
-			end)
-			if success and img then
-				AvatarImg.Image = img
-			end
-		end)
 		
 		local NameLabel = Instance.new("TextLabel")
 		NameLabel.Size = UDim2.new(1, -35, 1, 0)
@@ -666,10 +600,6 @@ UpdatePlayerList = function()
 		ClickBtn.Parent = Row
 		
 		ClickBtn.MouseButton1Click:Connect(function()
-			if SelectedPlayer and SelectedPlayer ~= plr then
-				RemoveESPFromPlayer(SelectedPlayer)
-			end
-			
 			SelectedPlayer = (SelectedPlayer == plr) and nil or plr
 			
 			EspBtn.Visible = (SelectedPlayer ~= nil)
@@ -686,7 +616,6 @@ UpdatePlayerList = function()
 	end)
 end
 
--- Copy Tag Logic
 ToggleTagBtn.MouseButton1Click:Connect(function()
 	if not SelectedPlayer then return end
 	
@@ -695,14 +624,10 @@ ToggleTagBtn.MouseButton1Click:Connect(function()
 	
 	if setclipboard then
 		setclipboard(tagString)
-	else
-		print("Tag Copied to Log:", tagString)
 	end
 	
 	ToggleTagBtn.Text = "Copied!"
 	ToggleTagBtn.TextColor3 = Color3.fromRGB(255, 255, 0)
-	
-	tagString = overheadPrefix .. SelectedPlayer.DisplayName .. " (@" .. SelectedPlayer.Name .. ")"
 	
 	task.delay(1.5, function()
 		ToggleTagBtn.Text = "Toggle Tag"
@@ -734,18 +659,15 @@ end)
 
 SearchBox:GetPropertyChangedSignal("Text"):Connect(UpdatePlayerList)
 
--- Continuous loop to refresh tags live as they load in-game
+-- Safe list refresher interval
 task.spawn(function()
-	while task.wait(1) do
+	while task.wait(5) do
 		if UpdatePlayerList and Panel.Visible then
 			UpdatePlayerList()
 		end
 	end
 end)
 
---// ----------------------------------------------------
---// STAFF JOIN / LEAVE NOTIFIER LOGIC
---// ----------------------------------------------------
 local function CheckAndNotifyStaff(player, isJoin)
 	task.spawn(function()
 		if isStaff(player) then
@@ -764,16 +686,14 @@ Players.PlayerAdded:Connect(function(player)
 	CheckAndNotifyStaff(player, true)
 end)
 
-Players.PlayerRemoving:Connect(joinOrLeavePlayer)
 Players.PlayerRemoving:Connect(function(player)
 	CheckAndNotifyStaff(player, false)
 	groupCache[player.UserId] = nil
 	if SelectedPlayer == player then 
-		RemoveESPFromPlayer(player)
 		SelectedPlayer = nil 
 		EspBtn.Visible = false
 	end
-	if SpectatingPlayer == player then
+	if SpectateBtn and SpectatingPlayer == player then
 		Camera.CameraSubject = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
 		SpectatingPlayer = nil
 		SpectateBtn.TextColor3 = Color3.fromRGB(0, 255, 100)
@@ -784,36 +704,35 @@ end)
 UpdatePlayerList()
 
 --// ----------------------------------------------------
---// ANTI-AIMVIEW DETECTOR LOGIC
+--// SPECTATE & AIMVIEW DETECTOR (Throttled Background Thread)
 --// ----------------------------------------------------
-local function isAimViewInstance(child)
-	if child:IsA("Beam") or child:IsA("LineHandleAdornment") or child.Name:find("Aim") or child.Name:find("Viewer") then
-		return true
+task.spawn(function()
+	local lastAlertTimes = {}
+	while task.wait(2) do
+		pcall(function()
+			local myChar = LocalPlayer.Character
+			if not myChar then return end
+			local myHum = myChar:FindFirstChildOfClass("Humanoid")
+
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character then
+					local pChar = plr.Character
+					local pHumanoid = pChar:FindFirstChildOfClass("Humanoid")
+					
+					if pHumanoid and myHum then
+						if pHumanoid.CameraSubject == myChar or pHumanoid.CameraSubject == myHum then
+							local now = tick()
+							lastAlertTimes[plr.UserId] = lastAlertTimes[plr.UserId] or 0
+							if now - lastAlertTimes[plr.UserId] > 15 then
+								lastAlertTimes[plr.UserId] = now
+								notify("⚠️ SPECTATE", plr.DisplayName .. " (" .. plr.Name .. ") is spectating you!", getHead(plr.UserId))
+							end
+						end
+					end
+				end
+			end
+		end)
 	end
-	return false
-end
-
-local function monitorCharacter(char)
-	if not char then return end
-
-	for _, child in ipairs(char:GetDescendants()) do
-		if isAimViewInstance(child) then
-			notify("⚠️ WARNING", "you are being aimviewed", getHead(LocalPlayer.UserId))
-			break
-		end
-	end
-
-	char.DescendantAdded:Connect(function(child)
-		if isAimViewInstance(child) then
-			notify("⚠️ WARNING", "you are being aimviewed", getHead(LocalPlayer.UserId))
-		end
-	end)
-end
-
-if LocalPlayer.Character then
-	monitorCharacter(LocalPlayer.Character)
-end
-
-LocalPlayer.CharacterAdded:Connect(monitorCharacter)
+end)
 
 print("@hi im yen")
