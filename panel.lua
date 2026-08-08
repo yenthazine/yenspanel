@@ -43,6 +43,7 @@ local STAFF_USERIDS = {
 local SelectedPlayer = nil
 local SpectatingPlayer = nil
 local GlobalEspEnabled = false
+local IndividuallyEspedPlayers = {}
 
 -- Cache
 local groupCache = {}
@@ -117,7 +118,7 @@ local function ProcessPlayerGroupData(plr)
 					end
 				end
 			end
-			task.wait() -- Cooperative yield to prevent freezing
+			task.wait()
 		end
 
 		groupCache[plr.UserId] = {
@@ -369,6 +370,7 @@ BottomBarToggleBtn.MouseButton1Click:Connect(function()
 end)
 
 local function RemoveESPFromPlayer(plr)
+	IndividuallyEspedPlayers[plr] = nil
 	if plr and plr.Character then
 		local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
 		if head then
@@ -380,8 +382,16 @@ local function RemoveESPFromPlayer(plr)
 end
 
 local function RemoveESPFromEveryone()
+	table.clear(IndividuallyEspedPlayers)
 	for _, plr in ipairs(Players:GetPlayers()) do
-		RemoveESPFromPlayer(plr)
+		if plr ~= LocalPlayer and plr.Character then
+			local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
+			if head then
+				for _, tag in ipairs(head:GetChildren()) do
+					if tag.Name == "YenRedNameTag" then tag:Destroy() end
+				end
+			end
+		end
 	end
 end
 
@@ -440,7 +450,7 @@ local function CreateInGameTag(plr)
 		local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
 		
 		local attempts = 0
-		while (not char or not head or not char:FindFirstChild("Humanoid")) and attempts < 10 do
+		while (not char or not head or not char:FindFirstChild("Humanoid")) and attempts < 15 do
 			task.wait(0.2)
 			char = plr.Character
 			head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
@@ -448,6 +458,8 @@ local function CreateInGameTag(plr)
 		end
 		
 		if not char or not head then return end
+
+		if not GlobalEspEnabled and not IndividuallyEspedPlayers[plr] then return end
 
 		for _, tag in ipairs(head:GetChildren()) do
 			if tag.Name == "YenRedNameTag" then tag:Destroy() end
@@ -478,8 +490,11 @@ local function CreateInGameTag(plr)
 	end)
 end
 
-local function ApplyESPToPlayer(plr)
+local function ApplyESPToPlayer(plr, manualToggle)
 	if not plr or plr == LocalPlayer then return end
+	if manualToggle then
+		IndividuallyEspedPlayers[plr] = true
+	end
 	CreateInGameTag(plr)
 end
 
@@ -487,20 +502,49 @@ local function TogglePlayerESP(plr)
 	if not plr then return end
 	local char = plr.Character
 	local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
-	local hasTag = head and head:FindFirstChild("YenRedNameTag") ~= nil
+	local hasTag = (head and head:FindFirstChild("YenRedNameTag") ~= nil) or IndividuallyEspedPlayers[plr]
 	
 	if hasTag then
 		RemoveESPFromPlayer(plr)
 	else
-		ApplyESPToPlayer(plr)
+		ApplyESPToPlayer(plr, true)
 	end
 end
 
 local function IsPlayerEspActive(plr)
-	if not plr or not plr.Character then return false end
+	if not plr then return false end
+	if IndividuallyEspedPlayers[plr] or GlobalEspEnabled then return true end
+	if not plr.Character then return false end
 	local head = plr.Character:FindFirstChild("Head") or plr.Character:FindFirstChild("HumanoidRootPart")
 	return head and head:FindFirstChild("YenRedNameTag") ~= nil
 end
+
+local function SetupPlayerESPConnections(plr)
+	plr.CharacterAdded:Connect(function(newChar)
+		task.delay(0.5, function()
+			if GlobalEspEnabled or IndividuallyEspedPlayers[plr] then
+				CreateInGameTag(plr)
+			end
+		end)
+	end)
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr ~= LocalPlayer then
+		SetupPlayerESPConnections(plr)
+	end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+	SetupPlayerESPConnections(plr)
+	if GlobalEspEnabled then
+		task.delay(1, function()
+			if GlobalEspEnabled and plr ~= LocalPlayer then
+				ApplyESPToPlayer(plr, false)
+			end
+		end)
+	end
+end)
 
 EspBtn.MouseButton1Click:Connect(function()
 	if SelectedPlayer then
@@ -522,7 +566,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if GlobalEspEnabled then
 			for _, plr in ipairs(Players:GetPlayers()) do
 				if plr ~= LocalPlayer then
-					ApplyESPToPlayer(plr)
+					ApplyESPToPlayer(plr, false)
 				end
 			end
 		else
@@ -531,18 +575,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
-Players.PlayerAdded:Connect(function(plr)
-	if GlobalEspEnabled then
-		task.delay(1, function()
-			if GlobalEspEnabled and plr ~= LocalPlayer then
-				ApplyESPToPlayer(plr)
-			end
-		end)
-	end
-end)
-
 --// ----------------------------------------------------
---// PANEL LIST LOGIC (Only runs when Panel is Open)
+--// PANEL LIST LOGIC
 --// ----------------------------------------------------
 UpdatePlayerList = function()
 	if not Panel.Visible then return end
@@ -668,8 +702,17 @@ task.spawn(function()
 	end
 end)
 
+-- Fixed Staff Check & Notify Loop (Ensures group data resolves completely before checking status on join)
 local function CheckAndNotifyStaff(player, isJoin)
 	task.spawn(function()
+		local attempts = 0
+		local data = ProcessPlayerGroupData(player)
+		while not groupCache[player.UserId] and attempts < 10 do
+			task.wait(0.5)
+			data = ProcessPlayerGroupData(player)
+			attempts += 1
+		end
+
 		if isStaff(player) then
 			local actionText = isJoin and "joined the server" or "left the server"
 			notify(player.DisplayName, player.Name .. " " .. actionText, getHead(player.UserId))
@@ -689,6 +732,7 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	CheckAndNotifyStaff(player, false)
 	groupCache[player.UserId] = nil
+	IndividuallyEspedPlayers[player] = nil
 	if SelectedPlayer == player then 
 		SelectedPlayer = nil 
 		EspBtn.Visible = false
@@ -704,7 +748,7 @@ end)
 UpdatePlayerList()
 
 --// ----------------------------------------------------
---// SPECTATE & AIMVIEW DETECTOR (Throttled Background Thread)
+--// SPECTATE & AIMVIEW DETECTOR
 --// ----------------------------------------------------
 task.spawn(function()
 	local lastAlertTimes = {}
